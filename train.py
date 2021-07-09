@@ -380,7 +380,9 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                         iter_time = interval_time / opt.interval
 
                         mloss = mloss / opt.interval
-                        s = f"YoloV5: epoch[{epoch}] " \
+                        lr = optimizer.param_groups[0].get('lr')
+                        s = f"YoloV5: epoch: [{epoch}] " \
+                            f"lr: {lr:2f} " \
                             f"lbox: {i}/{nb} {mloss[0].item() * opt.batch_size:2f}, " \
                             f"lobj: {mloss[1].item() * opt.batch_size:2f}, " \
                             f"lcls: {mloss[2].item() * opt.batch_size:2f} " \
