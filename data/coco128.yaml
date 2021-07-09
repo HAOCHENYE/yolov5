@@ -2,7 +2,7 @@
 # Train command: python train.py --data coco128.yaml
 # Default dataset location is next to YOLOv5:
 #   /parent_folder
-#     /coco128
+#     /coco128ls
 #     /yolov5
 
 

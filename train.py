@@ -8,7 +8,7 @@ import warnings
 from copy import deepcopy
 from pathlib import Path
 from threading import Thread
-
+import logging
 import numpy as np
 import torch.distributed as dist
 import torch.nn as nn
@@ -35,9 +35,10 @@ from utils.loss import ComputeLoss
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, de_parallel
 from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
+import time
+from mmcv.utils import get_logger
 
-logger = logging.getLogger(__name__)
-
+logger = get_logger(name='YOLOV5', log_file="./my_train_log", log_level=logging.INFO)
 
 def train(hyp,  # path/to/hyp.yaml or hyp dictionary
           opt,
@@ -158,8 +159,10 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     # plot_lr_scheduler(optimizer, scheduler, epochs)
 
     # EMA
-    ema = ModelEMA(model) if rank in [-1, 0] else None
-
+    if opt.ema:
+        ema = ModelEMA(model) if rank in [-1, 0] else None
+    else:
+        ema = None
     # Resume
     start_epoch, best_fitness = 0, 0.0
     if pretrained:
@@ -257,7 +260,10 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     maps = np.zeros(nc)  # mAP per class
     results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
     scheduler.last_epoch = start_epoch - 1  # do not move
-    scaler = amp.GradScaler(enabled=cuda)
+    if opt.amp:
+        scaler = amp.GradScaler(enabled=cuda)
+    else:
+        scaler = None
     compute_loss = ComputeLoss(model)  # init loss class
     logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
                 f'Using {dataloader.num_workers} dataloader workers\n'
@@ -287,11 +293,15 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         mloss = torch.zeros(4, device=device)  # mean losses
         if rank != -1:
             dataloader.sampler.set_epoch(epoch)
+
         pbar = enumerate(dataloader)
         logger.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'labels', 'img_size'))
         if rank in [-1, 0]:
-            pbar = tqdm(pbar, total=nb)  # progress bar
+            if not opt.batch_loss:
+                pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
+
+        interval_start = time.time()
         for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
@@ -316,7 +326,18 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                     imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
             # Forward
-            with amp.autocast(enabled=cuda):
+            if opt.amp:
+                with amp.autocast(enabled=cuda):
+                    pred = model(imgs)  # forward
+                    loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                    if rank != -1:
+                        loss *= opt.world_size  # gradient averaged between devices in DDP mode
+                    if opt.quad:
+                        loss *= 4.
+                # Backward
+                scaler.scale(loss).backward()
+
+            else:
                 pred = model(imgs)  # forward
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                 if rank != -1:
@@ -324,24 +345,52 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 if opt.quad:
                     loss *= 4.
 
-            # Backward
-            scaler.scale(loss).backward()
+                loss.backward()
+
+
+
 
             # Optimize
             if ni % accumulate == 0:
-                scaler.step(optimizer)  # optimizer.step
-                scaler.update()
+
+                if opt.amp:
+                    scaler.step(optimizer)  # optimizer.step
+                    scaler.update()
+                else:
+                    optimizer.step()
+
                 optimizer.zero_grad()
                 if ema:
                     ema.update(model)
 
             # Print
             if rank in [-1, 0]:
-                mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
-                mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-                s = ('%10s' * 2 + '%10.4g' * 6) % (
-                    f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1])
-                pbar.set_description(s)
+                if not opt.batch_loss:
+                    mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                    mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
+                    s = ('%10s' * 2 + '%10.4g' * 6) % (
+                        f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1])
+                    pbar.set_description(s)
+                else:
+                    mloss = loss_items + mloss
+                    if i % opt.interval == 0:
+
+                        interval_end = time.time()
+                        interval_time = interval_end - interval_start
+                        iter_time = interval_time / opt.interval
+
+                        mloss = mloss / opt.interval
+                        s = f"YoloV5: lbox: {i}/{nb} {mloss[0].item() * opt.batch_size:2f}, " \
+                            f"lobj: {mloss[1].item() * opt.batch_size:2f}, " \
+                            f"lcls: {mloss[2].item() * opt.batch_size:2f} " \
+                            f"time_iter: {iter_time: 2f} " \
+                            f"time_epoch: {iter_time * nb: 2f}s"
+
+                        logger.log(logging.INFO, s)
+                        interval_start = time.time()
+                        mloss = torch.zeros(4, device=device)
+
+
 
                 # Plot
                 if plots and ni < 3:
@@ -364,18 +413,19 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         # DDP process 0 or single-GPU
         if rank in [-1, 0]:
             # mAP
-            ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights'])
+            if ema:
+                ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights'])
             final_epoch = epoch + 1 == epochs
             if not opt.notest or final_epoch:  # Calculate mAP
                 wandb_logger.current_epoch = epoch + 1
                 results, maps, _ = test.test(data_dict,
                                              batch_size=batch_size * 2,
                                              imgsz=imgsz_test,
-                                             model=ema.ema,
+                                             model=ema.ema if ema else model.module,
                                              single_cls=single_cls,
                                              dataloader=testloader,
                                              save_dir=save_dir,
-                                             save_json=is_coco and final_epoch,
+                                             save_json=is_coco,
                                              verbose=nc < 50 and final_epoch,
                                              plots=plots and final_epoch,
                                              wandb_logger=wandb_logger,
@@ -408,8 +458,8 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                         'best_fitness': best_fitness,
                         'training_results': results_file.read_text(),
                         'model': deepcopy(de_parallel(model)).half(),
-                        'ema': deepcopy(ema.ema).half(),
-                        'updates': ema.updates,
+                        'ema': deepcopy(ema.ema).half() if ema else None,
+                        'updates': ema.updates if ema else None,
                         'optimizer': optimizer.state_dict(),
                         'wandb_id': wandb_logger.wandb_run.id if wandb_logger.wandb else None}
 
@@ -499,6 +549,10 @@ if __name__ == '__main__':
     parser.add_argument('--bbox_interval', type=int, default=-1, help='Set bounding-box image logging interval for W&B')
     parser.add_argument('--save_period', type=int, default=-1, help='Log model after every "save_period" epoch')
     parser.add_argument('--artifact_alias', type=str, default="latest", help='version of dataset artifact to be used')
+    parser.add_argument('--ema', type=str, default=False, help='ema should be opt!!!')
+    parser.add_argument('--amp', type=str, default=False, help='amp should be opt!!!')
+    parser.add_argument('--batch_loss', type=str, default=True, help='batch_loss')
+    parser.add_argument('--interval', type=int, default=10, help='interval')
     opt = parser.parse_args()
 
     # Set DDP variables

@@ -3,11 +3,11 @@ import json
 import os
 from pathlib import Path
 from threading import Thread
-
 import numpy as np
 import torch
 import yaml
 from tqdm import tqdm
+
 
 from models.experimental import attempt_load
 from utils.datasets import create_dataloader
@@ -260,7 +260,7 @@ def test(data,
     # Save JSON
     if save_json and len(jdict):
         w = Path(weights[0] if isinstance(weights, list) else weights).stem if weights is not None else ''  # weights
-        anno_json = '../coco/annotations/instances_val2017.json'  # annotations json
+        anno_json = '/usr/videodate/yehc/coco/annotations/instances_val2017.json'  # annotations json
         pred_json = str(save_dir / f"{w}_predictions.json")  # predictions json
         print('\nEvaluating pycocotools mAP... saving %s...' % pred_json)
         with open(pred_json, 'w') as f:
