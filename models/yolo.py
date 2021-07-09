@@ -17,6 +17,7 @@ from models.common import *
 from models.experimental import *
 from utils.autoanchor import check_anchor_order
 from utils.general import make_divisible, check_file, set_logging
+from utils.plots import feature_visualization
 from utils.torch_utils import time_synchronized, fuse_conv_and_bn, model_info, scale_img, initialize_weights, \
     select_device, copy_attr
 
@@ -116,11 +117,10 @@ class Model(nn.Module):
         self.info()
         logger.info('')
 
-    def forward(self, x, augment=False, profile=False):
+    def forward(self, x, augment=False, profile=False, visualize=False):
         if augment:
             return self.forward_augment(x)  # augmented inference, None
-        else:
-            return self.forward_once(x, profile)  # single-scale inference, train
+        return self.forward_once(x, profile, visualize)  # single-scale inference, train
 
     def forward_augment(self, x):
         img_size = x.shape[-2:]  # height, width
@@ -135,7 +135,7 @@ class Model(nn.Module):
             y.append(yi)
         return torch.cat(y, 1), None  # augmented inference, train
 
-    def forward_once(self, x, profile=False):
+    def forward_once(self, x, profile=False, visualize=False):
         y, dt = [], []  # outputs
         for m in self.model:
             if m.f != -1:  # if not from previous layer
@@ -153,6 +153,9 @@ class Model(nn.Module):
 
             x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
+
+            if visualize:
+                feature_visualization(x, m.type, m.i, save_dir=visualize)
 
         if profile:
             logger.info('%.1fms total' % sum(dt))

@@ -380,7 +380,8 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                         iter_time = interval_time / opt.interval
 
                         mloss = mloss / opt.interval
-                        s = f"YoloV5: lbox: {i}/{nb} {mloss[0].item() * opt.batch_size:2f}, " \
+                        s = f"YoloV5: epoch{epoch}" \
+                            f"lbox: {i}/{nb} {mloss[0].item() * opt.batch_size:2f}, " \
                             f"lobj: {mloss[1].item() * opt.batch_size:2f}, " \
                             f"lcls: {mloss[2].item() * opt.batch_size:2f} " \
                             f"time_iter: {iter_time: 2f} " \
@@ -411,66 +412,67 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         scheduler.step()
 
         # DDP process 0 or single-GPU
-        if rank in [-1, 0]:
-            # mAP
-            if ema:
-                ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights'])
-            final_epoch = epoch + 1 == epochs
-            if not opt.notest or final_epoch:  # Calculate mAP
-                wandb_logger.current_epoch = epoch + 1
-                results, maps, _ = test.test(data_dict,
-                                             batch_size=batch_size * 2,
-                                             imgsz=imgsz_test,
-                                             model=ema.ema if ema else model.module,
-                                             single_cls=single_cls,
-                                             dataloader=testloader,
-                                             save_dir=save_dir,
-                                             save_json=is_coco,
-                                             verbose=nc < 50 and final_epoch,
-                                             plots=plots and final_epoch,
-                                             wandb_logger=wandb_logger,
-                                             compute_loss=compute_loss)
+        if epoch % opt.eval_interval == 0:
+            if rank in [-1, 0]:
+                # mAP
+                if ema:
+                    ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights'])
+                final_epoch = epoch + 1 == epochs
+                if not opt.notest or final_epoch:  # Calculate mAP
+                    wandb_logger.current_epoch = epoch + 1
+                    results, maps, _ = test.test(data_dict,
+                                                 batch_size=batch_size * 2,
+                                                 imgsz=imgsz_test,
+                                                 model=ema.ema if ema else model.module,
+                                                 single_cls=single_cls,
+                                                 dataloader=testloader,
+                                                 save_dir=save_dir,
+                                                 save_json=is_coco,
+                                                 verbose=nc < 50 and final_epoch,
+                                                 plots=plots and final_epoch,
+                                                 wandb_logger=wandb_logger,
+                                                 compute_loss=compute_loss)
+                logger.log(logging.INFO, f"coco: map50: {results[2]}, map: {results[3]}")
+                # Write
+                with open(results_file, 'a') as f:
+                    f.write(s + '%10.4g' * 7 % results + '\n')  # append metrics, val_loss
 
-            # Write
-            with open(results_file, 'a') as f:
-                f.write(s + '%10.4g' * 7 % results + '\n')  # append metrics, val_loss
+                # Log
+                tags = ['train/box_loss', 'train/obj_loss', 'train/cls_loss',  # train loss
+                        'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
+                        'val/box_loss', 'val/obj_loss', 'val/cls_loss',  # val loss
+                        'x/lr0', 'x/lr1', 'x/lr2']  # params
+                for x, tag in zip(list(mloss[:-1]) + list(results) + lr, tags):
+                    if loggers['tb']:
+                        loggers['tb'].add_scalar(tag, x, epoch)  # TensorBoard
+                    if wandb_logger.wandb:
+                        wandb_logger.log({tag: x})  # W&B
 
-            # Log
-            tags = ['train/box_loss', 'train/obj_loss', 'train/cls_loss',  # train loss
-                    'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
-                    'val/box_loss', 'val/obj_loss', 'val/cls_loss',  # val loss
-                    'x/lr0', 'x/lr1', 'x/lr2']  # params
-            for x, tag in zip(list(mloss[:-1]) + list(results) + lr, tags):
-                if loggers['tb']:
-                    loggers['tb'].add_scalar(tag, x, epoch)  # TensorBoard
-                if wandb_logger.wandb:
-                    wandb_logger.log({tag: x})  # W&B
+                # Update best mAP
+                fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
+                if fi > best_fitness:
+                    best_fitness = fi
+                wandb_logger.end_epoch(best_result=best_fitness == fi)
 
-            # Update best mAP
-            fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
-            if fi > best_fitness:
-                best_fitness = fi
-            wandb_logger.end_epoch(best_result=best_fitness == fi)
+                # Save model
+                if (not opt.nosave) or (final_epoch and not opt.evolve):  # if save
+                    ckpt = {'epoch': epoch,
+                            'best_fitness': best_fitness,
+                            'training_results': results_file.read_text(),
+                            'model': deepcopy(de_parallel(model)).half(),
+                            'ema': deepcopy(ema.ema).half() if ema else None,
+                            'updates': ema.updates if ema else None,
+                            'optimizer': optimizer.state_dict(),
+                            'wandb_id': wandb_logger.wandb_run.id if wandb_logger.wandb else None}
 
-            # Save model
-            if (not opt.nosave) or (final_epoch and not opt.evolve):  # if save
-                ckpt = {'epoch': epoch,
-                        'best_fitness': best_fitness,
-                        'training_results': results_file.read_text(),
-                        'model': deepcopy(de_parallel(model)).half(),
-                        'ema': deepcopy(ema.ema).half() if ema else None,
-                        'updates': ema.updates if ema else None,
-                        'optimizer': optimizer.state_dict(),
-                        'wandb_id': wandb_logger.wandb_run.id if wandb_logger.wandb else None}
-
-                # Save last, best and delete
-                torch.save(ckpt, last)
-                if best_fitness == fi:
-                    torch.save(ckpt, best)
-                if wandb_logger.wandb:
-                    if ((epoch + 1) % opt.save_period == 0 and not final_epoch) and opt.save_period != -1:
-                        wandb_logger.log_model(last.parent, opt, epoch, fi, best_model=best_fitness == fi)
-                del ckpt
+                    # Save last, best and delete
+                    torch.save(ckpt, last)
+                    if best_fitness == fi:
+                        torch.save(ckpt, best)
+                    if wandb_logger.wandb:
+                        if ((epoch + 1) % opt.save_period == 0 and not final_epoch) and opt.save_period != -1:
+                            wandb_logger.log_model(last.parent, opt, epoch, fi, best_model=best_fitness == fi)
+                    del ckpt
 
         # end epoch ----------------------------------------------------------------------------------------------------
     # end training -----------------------------------------------------------------------------------------------------
@@ -497,6 +499,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                                               save_dir=save_dir,
                                               save_json=True,
                                               plots=False)
+
 
             # Strip optimizers
             for f in last, best:
@@ -553,6 +556,7 @@ if __name__ == '__main__':
     parser.add_argument('--amp', type=str, default=False, help='amp should be opt!!!')
     parser.add_argument('--batch_loss', type=str, default=True, help='batch_loss')
     parser.add_argument('--interval', type=int, default=10, help='interval')
+    parser.add_argument('--eval_interval', type=int, default=5, help='interval')
     opt = parser.parse_args()
 
     # Set DDP variables
