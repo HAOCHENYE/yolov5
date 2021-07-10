@@ -38,8 +38,9 @@ from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
 import time
 from mmcv.utils import get_logger
 
-logger = get_logger(name='YOLOV5', log_file="./my_train_log", log_level=logging.INFO)
+logger = get_logger(name='YOLOV5', log_file=None, log_level=logging.INFO)
 
+'runs/train/exp23/my_train_log'
 def train(hyp,  # path/to/hyp.yaml or hyp dictionary
           opt,
           device,
@@ -49,12 +50,15 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         opt.single_cls
 
     # Directories
+
     wdir = save_dir / 'weights'
     wdir.mkdir(parents=True, exist_ok=True)  # make dir
     last = wdir / 'last.pt'
     best = wdir / 'best.pt'
     results_file = save_dir / 'results.txt'
 
+    sample_per_gpu = batch_size / torch.cuda.device_count()  # TODO Bad code, not all gpus will be used
+    train_logger = get_logger(name='train_log', log_file=f"{opt.save_dir}/my_train_log", log_level=logging.INFO)
     # Hyperparameters
     if isinstance(hyp, str):
         with open(hyp) as f:
@@ -381,15 +385,16 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 
                         mloss = mloss / opt.interval
                         lr = optimizer.param_groups[0].get('lr')
-                        s = f"YoloV5: epoch: [{epoch}] " \
-                            f"lr: {lr:2f} " \
-                            f"lbox: {i}/{nb} {mloss[0].item() * opt.batch_size:2f}, " \
-                            f"lobj: {mloss[1].item() * opt.batch_size:2f}, " \
-                            f"lcls: {mloss[2].item() * opt.batch_size:2f} " \
-                            f"time_iter: {iter_time: 2f} " \
-                            f"time_epoch: {iter_time * nb: 2f}s"
 
-                        logger.log(logging.INFO, s)
+                        s = f"YoloV5: epoch: [{i}/{nb}] " \
+                            f"lr: {lr:4f} " \
+                            f"lbox: {mloss[0].item() * sample_per_gpu:.3f}, " \
+                            f"lobj: {mloss[1].item() * sample_per_gpu:.3f}, " \
+                            f"lcls: {mloss[2].item() * sample_per_gpu:.3f} " \
+                            f"time_iter: {iter_time:.3f} " \
+                            f"time_epoch: {iter_time * nb:.3f}s"
+
+                        train_logger.log(logging.INFO, s)
                         interval_start = time.time()
                         mloss = torch.zeros(4, device=device)
 
@@ -414,7 +419,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         scheduler.step()
 
         # DDP process 0 or single-GPU
-        if epoch % opt.eval_interval == 0:
+        if epoch % opt.eval_interval == 0 and epoch != 0:
             if rank in [-1, 0]:
                 # mAP
                 if ema:
@@ -429,12 +434,13 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                                                  single_cls=single_cls,
                                                  dataloader=testloader,
                                                  save_dir=save_dir,
+                                                 # save_json=False,
                                                  save_json=is_coco,
                                                  verbose=nc < 50 and final_epoch,
                                                  plots=plots and final_epoch,
                                                  wandb_logger=wandb_logger,
                                                  compute_loss=compute_loss)
-                logger.log(logging.INFO, f"coco: map50: {results[2]}, map: {results[3]}")
+                train_logger.log(logging.INFO, f"coco: map50: {results[2]}, map: {results[3]}")
                 # Write
                 with open(results_file, 'a') as f:
                     f.write(s + '%10.4g' * 7 % results + '\n')  # append metrics, val_loss
@@ -558,7 +564,7 @@ if __name__ == '__main__':
     parser.add_argument('--amp', type=str, default=False, help='amp should be opt!!!')
     parser.add_argument('--batch_loss', type=str, default=True, help='batch_loss')
     parser.add_argument('--interval', type=int, default=10, help='interval')
-    parser.add_argument('--eval_interval', type=int, default=5, help='interval')
+    parser.add_argument('--eval_interval', type=int, default=1, help='interval')
     opt = parser.parse_args()
 
     # Set DDP variables
