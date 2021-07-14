@@ -12,26 +12,8 @@ train: val2017.txt  # 118287 images
 val: val2017.txt  # 5000 images
 test: /usr/videodate/yehc/coco/images/val2017  # 20288 of 40670 images, submit to https://competitions.codalab.org/competitions/20794
 
-<<<<<<< HEAD
-# train and val data as 1) directory: path/images/, 2) file: path/images.txt, or 3) list: [path1/images/, path2/images/]
-#train: ../coco/train2017.txt  # 118287 images
-
-train: /usr/videodate/yehc/coco/images/val2017  # 118287 images
-val: /usr/videodate/yehc/coco/images/val2017  # 5000 images
-test: ../coco/test-dev2017.txt  # 20288 of 40670 images, submit to https://competitions.codalab.org/competitions/20794
-
-#train: ../coco/train2017.txt  # 118287 images
-#val: ../coco/val2017.txt  # 5000 images
-#test: ../coco/test-dev2017.txt  # 20288 of 40670 images, submit to https://competitions.codalab.org/competitions/20794
-
-# number of classes
-nc: 80
-
-# class names
-=======
 # Classes
 nc: 80  # number of classes
->>>>>>> 248504cf13c2cba9e211e6110089a3e6f916109c
 names: [ 'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
          'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
          'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
