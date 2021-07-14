@@ -1,8 +1,13 @@
 # COCO 2017 dataset http://cocodataset.org - first 128 training images
 # Train command: python train.py --data coco128.yaml
 # Default dataset location is next to YOLOv5:
+<<<<<<< HEAD
+#   /parent_folder
+#     /coco128ls
+=======
 #   /parent
 #     /datasets/coco128
+>>>>>>> 248504cf13c2cba9e211e6110089a3e6f916109c
 #     /yolov5
 
 

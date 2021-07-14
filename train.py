@@ -7,7 +7,6 @@ Usage:
 import argparse
 import logging
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import random
 import sys
 import time
